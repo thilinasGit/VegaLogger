@@ -1,0 +1,54 @@
+String mainMenuItems[] = {
+  "Statistics",
+  "V/A Meters",
+  "IMU Device",
+  "MQTT Status",
+  "RS Read"
+  };
+
+String subMenuItems[] = {
+  "Solar (P01)",
+  "MPPT (P02)",
+  "Battery (P03)"
+  };
+
+String statMenuItems[] = {
+  "Current",
+  "Power",
+  "Energy"
+  };
+
+  String gyroMenuItems[] = {
+  "Acceleration",
+  "Gyrometer",
+  "Angle",
+  "Compass",
+  "Acc. Cali."
+    };
+
+///  voltage, current, power, wattHour, soc, temp
+extern String RSData[3][8] = {
+  {"--", "--","--", "--","--", "--","--", "--"},   //P01
+  {"--", "--","--", "--","--", "--","--", "--"},   //P02
+  {"--", "--","--", "--","--", "--","--", "--"}    //P03
+};
+
+
+byte icon[8] = {
+  B00000,
+  B00100,
+  B01110,
+  B01110,
+  B01110,
+  B01110,
+  B01110,
+  B00000
+};
+byte  c0[8]={B01110,B11111,B10001,B10001,B10001,B10001,B10001,B11111,};
+byte  a0[8]={B01110,B11111,B10001,B10001,B10001,B10001,B10001,B11111,};
+
+byte c1[8]={B01110,B11111,B10001,B10001,B10001,B10001,B11111,B11111,};
+byte c2[8]={B01110,B11111,B10001,B10001,B10001,B11111,B11111,B11111,};
+byte c3[8]={B01110,B11111,B10001,B10001,B11111,B11111,B11111,B11111,}; 
+byte c4[8]={B01110,B11111,B10001,B11111,B11111,B11111,B11111,B11111}; 
+byte c5[8]={B01110,B11111,B11111,B11111,B11111,B11111,B11111,B11111,}; 
