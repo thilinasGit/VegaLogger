@@ -1,3 +1,5 @@
+///to do memory optimization , refining code
+
 #include <PubSubClient.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
@@ -7,29 +9,30 @@
 #include <wit_c_sdk.h>
 #include <SoftwareSerial.h>
 
-const char* ssid = "Nokia 8";
-const char* password = "155155155";
-const char* mqttBroker = "broker.mqtt-dashboard.com";
-const int mqttPort = 1883;
-const char* mqttTopic0 = "tuklogclient";
-
-WiFiClient espClient;
-PubSubClient client(espClient);
-
-const char* ntpServer = "pool.ntp.org";
-unsigned long Epoch_Time;
 
 LiquidCrystal_I2C lcd(0x27, 16, 4);
 
+
+/// Network
+WiFiClient espClient;
+PubSubClient client(espClient);
+const char* ssid = "Starlink";
+const char* password = "155155155";
+const char* mqttBroker = "broker.mqtt-dashboard.com";
+const int mqttPort = 1883;
+const char* mqttTopic0 = "tukLogClient";
+bool cloudEnabled = true;
+const char* ntpServer = "pool.ntp.org";
+unsigned long Epoch_Time;
+int networkTimeout = 0;
+
 //HW RX,TX lines common for RS485 communication
-
 String receivedString = "";// Variable to store the received RS485 data string
-String displayInitiaize = "";// Variable to store the display initialization message
-String LCD_MSG = "";// Variable to store the display message
 
+
+////VA meter stuff
 const String RSCommands[3] = {":R50=1,2,1,\r\n", ":R50=2,2,1,\r\n", ":R50=3,2,1,\r\n"};
-int commandCycle = 0;
-
+int commandCycle = 0, receivedDeviceID = -1;
 int deviceID = 1, statMode = 0;
 bool RSDataAvailableFlag = false;
 String voltage, current, power, wattHour, soc, temp;
@@ -38,45 +41,58 @@ String voltage, current, power, wattHour, soc, temp;
 extern String mainMenuItems[];
 extern String subMenuItems[];
 extern String statMenuItems[];
+extern String gyroMenuItems[];
 int mainMenuOrder[] = {0, 1, 2, 3, 4};
 int subMenuOrder[] = {2, 0, 1};
 int statMenuOrder[] = {2, 0, 1};
-int mode = 0;
-bool cloudEnabled = false;
+int gyroMenuOrder[] = {4, 0, 1, 2, 3};
+int mode = 0, gyroMode = 0;
+
 extern byte icon[] ;
 
+//// IO
 #define RS485_DE 15
 #define DE_ActiveHigh 0
 #define button0 26
 #define button1 27
 #define button2 14
 
+/// time tracking variables
 unsigned long lastProcessTime = 0;
 const unsigned long processInterval = 20;  // tracking time
 
 /////////  gyro stuff
 SoftwareSerial mySerial(13, 12); // RX, TX
+bool SWSerialAvailableFlag = false;
 #define ACC_UPDATE    0x01
 #define GYRO_UPDATE   0x02
 #define ANGLE_UPDATE  0x04
 #define MAG_UPDATE    0x08
 #define READ_UPDATE   0x80
 static volatile char s_cDataUpdate = 0, s_cCmd = 0xff;
-
+int i;
+float fAcc[3], fGyro[3], fAngle[3], fMag[3] ;
 static void CmdProcess(void);
 static void RS485_IO_Init(void);
 static void AutoScanSensor(void);
 static void SensorUartSend(uint8_t *p_data, uint32_t uiSize);
 static void CopeSensorData(uint32_t uiReg, uint32_t uiRegNum);
 static void Delayms(uint16_t ucMs);
-
 const uint32_t c_uiBaud[8] = { 0, 4800, 9600, 19200, 38400, 57600, 115200, 230400};
+
+///// Jason obj for mqtt
+DynamicJsonDocument jsonDoc(350); // Adjust the capacity as needed
+
+
+
 
 void callback(char* topic, byte* payload, unsigned int length) {
   ////to do
 
 
 }
+
+
 
 void initWiFi() {
   WiFi.mode(WIFI_STA);
@@ -106,24 +122,18 @@ uint32_t getEpochTime() {
     time(&now); // Get the current time (epoch time)
     if (now != -1) {
       lcdUpdate("NTP server down!", 2, 0);
-      return epochTime = static_cast<uint32_t>(now);
+      return epochTime = static_cast<uint32_t>(now) * 1000;
     }
     else return -1;
   }
 }
 
 
-void MQTTPub(String ss) {
-  DynamicJsonDocument jsonDocument(200); // Adjust the capacity as needed
-
-  // Populate the JSON object with the values
-  jsonDocument["device_id"] = "SN001";
-  jsonDocument["data"] = random(1022, 1523);
-  jsonDocument["timestamp"] = getEpochTime();
+void MQTTPub() {
 
   // Convert the JSON object to a JSON string
   String jsonString;
-  serializeJson(jsonDocument, jsonString);
+  serializeJson(jsonDoc, jsonString);
   char payload[jsonString.length() + 1]; // +1 for the null-terminator
 
   const char* cstr2 = jsonString.c_str();
@@ -132,7 +142,13 @@ void MQTTPub(String ss) {
 
 void reconnect() {
   while (!client.connected()) {
-    Serial.print("Attempting MQTT connection...");
+    networkTimeout++;
+    if (networkTimeout > 2) {
+      lcdUpdate("Connection Lost", 1, 1);
+      lcdUpdate("", 0, 1);
+      lcdUpdate("", 2, 1);
+      lcdUpdate("", 3, 0);
+    }
     String clientId = "ESP32Client-";
     clientId += String(random(0xffff), HEX);
 
@@ -147,21 +163,15 @@ void reconnect() {
   }
 }
 
-
-int i;
-float fAcc[3], fGyro[3], fAngle[3];
-
-
 //                                                _____
 //                                               / ____|
-//                                              | (___  
+//                                              | (___
 //                                               \___ \
 //                                               ____) |
-//                                              |_____/ 
+//                                              |_____/
 
 
 void setup() {
-  //LCD Initializatio
   lcd.begin();
   lcd.backlight();
   lcd.createChar(1, icon); // battery icon
@@ -180,103 +190,141 @@ void setup() {
     configTime(0, 0, ntpServer);
     delay(2500);
   }
+
   mySerial.begin(9600);
   WitInit(WIT_PROTOCOL_NORMAL, 0x50);
   WitSerialWriteRegister(SensorUartSend);
   WitRegisterCallBack(SensorDataUpdata);
-  WitDelayMsRegister(Delayms);
-  WitSetUartBaud(WIT_BAUD_115200);
-  Serial.begin(c_uiBaud[WIT_BAUD_115200]);
+  WitDelayMsRegister(Delayms); WitSetUartBaud(WIT_BAUD_115200);
   lcdUpdate("RS485 down", 1, 1); ////////////////////////////////////////////////not required
   lcdUpdate("--", 2, 0); ////////////////////////////////////////////////not required
 }
 
 
-//                                                                             _     
-//                                                                            | |    
-//                                                                            | |    
-//                                                                            | |    
+//                                                                             _
+//                                                                            | |
+//                                                                            | |
+//                                                                            | |
 //                                                                            | |____
 //                                                                            |______|
 
-void loop() {   
-  if (cloudEnabled && !client.connected()) {
-    reconnect();
-  }
+void loop() {
+
+  gyroStuff();
+
+  networkTimeout = 0;
+  if (cloudEnabled)
+    if (!client.connected()) {
+      reconnect();
+
+    }
+
 
   if (commandCycle > 2)commandCycle = 0;
+
   RsSend(RSCommands[commandCycle]);
-  if(mode==4)deviceID = commandCycle + 1;
-  delay(9);
+  if (mode == 4)deviceID = commandCycle + 1;
+  delay(10);
+  RSDataAvailableFlag = false;
   serialStuff();
 
+  jsonStuff();
+
+
+  //// UI Render
   switch (mode) {
     case 0: mainMenuPg(); break;
     case 1: subMenuPg(); break;
     case 2: dashboardPg(); break;
     case 3: statMenuPg(); break;
-    case 4:       
-      statPg();
-      break;
-    case 5: gyroPg(); break;
+    case 4: statPg();   break;
+    case 5: gyroMenuPg(); break;
+    case 6: gyroPg(); break;
     case 485: RSReadPg("", 1);
   }
+
+
 
   // unsigned long currentMillis = millis();
   //
   //  if (currentMillis - lastProcessTime >= processInterval) {// Pseudo thread every xx millis
-  //    lastProcessTime = currentMillis;  
+  //    lastProcessTime = currentMillis;
   //}
 
   commandCycle++;
-  delay(20);
+  //delay(100);
 }
 
-    //                                                                ____  
-    //                                                               / ___| 
-    //                                                              | |  _  
-    //                                                              | |_| | 
-    //                                                               \____| 
-    //                                                              
-//                                                                  \\   //
-//                                                                   \\ //
-//                                                                    \v/
-//                                                                    // 
+//                                                                ____
+//                                                               / ___|
+//                                                              | |  _
+//                                                              | |_| |
+//                                                               \____|
+//                                                                       ____
+//                                                                      |  _ \ 
+//                                                                      | | | |
+//                                                                      | |_| |
+//                                                                      |____/
 
 
 
-void gyroPg(){
- 
-   while (mySerial.available())
+void gyroStuff() {
+  while (mySerial.available())
+  {
+    WitSerialDataIn(mySerial.read());
+    SWSerialAvailableFlag = true;
+  }
+
+  //CmdProcess();
+  if (s_cDataUpdate)
+  {
+    for (i = 0; i < 3; i++)
     {
-      WitSerialDataIn(mySerial.read());
+      fAcc[i] = sReg[AX + i] / 32768.0f * 16.0f;
+      fGyro[i] = sReg[GX + i] / 32768.0f * 2000.0f;
+      fAngle[i] = sReg[Roll + i] / 32768.0f * 180.0f;
     }
 
-    CmdProcess();
-    if(s_cDataUpdate)
+    if (s_cDataUpdate & ACC_UPDATE)
     {
-      for(i = 0; i < 3; i++)
-      {
-        fAcc[i] = sReg[AX+i] / 32768.0f * 16.0f;
-        fGyro[i] = sReg[GX+i] / 32768.0f * 2000.0f;
-        fAngle[i] = sReg[Roll+i] / 32768.0f * 180.0f;
-      }
-      if(s_cDataUpdate & ACC_UPDATE)
-      {
-        lcdUpdate("  Acceleration", 0, 1);
-  lcdUpdate(String(fAcc[0]), 1, 1);
-  lcdUpdate(String(fAcc[1]), 2, 1);
-  lcdUpdate(String(fAcc[2]), 3, 0);
-        s_cDataUpdate &= ~ACC_UPDATE;
+      //      jsonDoc["imu_AccX"] = fAcc[0];
+      //      jsonDoc["imu_AccY"] = fAcc[1];
+      //      jsonDoc["imu_AccZ"] = fAcc[2];
+      s_cDataUpdate &= ~ACC_UPDATE;
+    }
+    if (s_cDataUpdate & GYRO_UPDATE)
+    {
+      //      jsonDoc["imu_GyroX"] = fGyro[0];
+      //      jsonDoc["imu_GyroY"] = fGyro[1];
+      //      jsonDoc["imu_GyroZ"] = fGyro[2];
+      s_cDataUpdate &= ~GYRO_UPDATE;
+    }
+    if (s_cDataUpdate & ANGLE_UPDATE)
+    {
+      //      jsonDoc["imu_AngleX"] = fAngle[0];
+      //      jsonDoc["imu_AngleY"] = fAngle[1];
+      //      jsonDoc["imu_AngleZ"] = fAngle[2];
 
-      s_cDataUpdate = 0;
-    }}
-  switch (getBtnStatus()) {
-    case 2:
-      mode = 0; break;
+      s_cDataUpdate &= ~ANGLE_UPDATE;
+    }
+    if (s_cDataUpdate & MAG_UPDATE)
+    {
+      fMag[0] = sReg[HX];
+      fMag[1] = sReg[HY];
+      fMag[2] = sReg[HZ];
+
+      //      jsonDoc["imu_MagX"] = fMag[0];
+      //      jsonDoc["imu_MagY"] = fMag[1];
+      //      jsonDoc["imu_MagZ"] = fMag[2];
+      s_cDataUpdate &= ~MAG_UPDATE;
+    }
+
+    s_cDataUpdate = 0;
+
   }
-    
 }
+
+
 
 void mainMenuPg() {                         ///0                  ////////////////////////////////////////////MMENNUUUUUUUUUUUUUUUUUUU
 
@@ -297,11 +345,9 @@ void mainMenuPg() {                         ///0                  //////////////
       else if (mainMenuOrder[1] == 2)mode = 5;
       else if (mainMenuOrder[1] == 4) {
         mode = 485;
-        RSDataAvailableFlag = false;
+        //RSDataAvailableFlag = false;
         RSSplashPg();
       }
-      
-
       break;
 
     case 3:
@@ -328,7 +374,7 @@ void subMenuPg() {                         ///2                   //////////////
       else if (subMenuOrder[1] == 1)deviceID = 2;
       else if (subMenuOrder[1] == 2)deviceID = 3;
       mode = 2;
-      RSDataAvailableFlag = false;
+      // RSDataAvailableFlag = false;
       RSSplashPg();
       break;
 
@@ -360,7 +406,7 @@ void statMenuPg() {                         ///3                   /////////////
       else if (statMenuOrder[1] == 1)statMode = 1;
       else if (statMenuOrder[1] == 2)statMode = 2;
       mode = 4;
-      RSDataAvailableFlag = false;
+      //RSDataAvailableFlag = false;
       RSSplashPg();
       break;
 
@@ -373,30 +419,70 @@ void statMenuPg() {                         ///3                   /////////////
   }
 }
 
-//                                                                       ____  
+void gyroMenuPg() {                         ///7                   ////////////////////////////////////////////Gyro Menu
+  lcdUpdate("   IMU Data", 0, 1);
+  lcdUpdate(" " + gyroMenuItems[gyroMenuOrder[0]], 1, 1);
+  lcdUpdate(">" + gyroMenuItems[gyroMenuOrder[1]], 2, 1);
+  lcdUpdate(" " + gyroMenuItems[gyroMenuOrder[2]], 3, 0);
+
+  switch (getBtnStatus()) {
+    case 1:
+      rotateArray(gyroMenuOrder, 5 , false); break;
+
+    case 2:
+      if (gyroMenuOrder[1] == 0)gyroMode = 0;
+      else if (gyroMenuOrder[1] == 1)gyroMode = 1;
+      else if (gyroMenuOrder[1] == 2)gyroMode = 2;
+      else if (gyroMenuOrder[1] == 3)gyroMode = 3;
+      else if (gyroMenuOrder[1] == 4) {
+        WitStartAccCali();
+        gyroMode = 0;
+        RSSplashPg();
+        delay(5000);
+      }
+      mode = 6;
+      RSSplashPg();
+
+      break;
+
+    case 200:
+      mode = 0;
+      break;
+
+    case 3:
+      rotateArray(gyroMenuOrder, 5, true);  break;
+  }
+}
+
+//                                                                       ____
 //                                                                      |  _ \ 
 //                                                                      | | | |
 //                                                                      | |_| |
-//                                                                      |____/ 
+//                                                                      |____/
 
+int disconnectedTime;
 void dashboardPg() {                               /////////////////////////////////////////////
   char row1[20];
   char row2[20];
   char row3[20];
   char row4[20];
 
-  if (RSDataAvailableFlag) {
-    sprintf(row1, "P0%s   %s  %s", String(deviceID), temp.c_str(), soc.c_str());
-    sprintf(row2, "%s  %s", voltage.c_str(), current.c_str());
-    sprintf(row3, "Power :%s", power.c_str());
-    sprintf(row4, "Energy:%s", wattHour.c_str());
+  if (RSDataAvailableFlag && deviceID == receivedDeviceID) {
+    disconnectedTime = 0;
+    sprintf(row1, "P0%s   %s*C  %s%%", String(deviceID), temp.c_str(), soc.c_str());
+    sprintf(row2, "%sV  %sA", voltage.c_str(), current.c_str());
+    sprintf(row3, "Power :%sW", power.c_str());
+    sprintf(row4, "Energy:%skWh", wattHour.c_str());
 
     lcdUpdate(row1, 0, 1);
     lcdUpdate(row2, 1, 1);
     lcdUpdate(row3, 2, 1);
     lcdUpdate(row4, 3, 0);
   }
-  else RSSplashPg();
+  else {
+    disconnectedTime++;
+    if (disconnectedTime > 200)RSSplashPg();
+  }
 
   switch (getBtnStatus()) {
 
@@ -405,7 +491,7 @@ void dashboardPg() {                               /////////////////////////////
       if (subMenuOrder[1] == 0)deviceID = 1;
       else if (subMenuOrder[1] == 1)deviceID = 2;
       else if (subMenuOrder[1] == 2)deviceID = 3;
-      RSDataAvailableFlag = false;
+      //RSDataAvailableFlag = false;
       RSSplashPg();
       break;
 
@@ -422,28 +508,28 @@ void dashboardPg() {                               /////////////////////////////
       if (subMenuOrder[1] == 0)deviceID = 1;
       else if (subMenuOrder[1] == 1)deviceID = 2;
       else if (subMenuOrder[1] == 2)deviceID = 3;
-      RSDataAvailableFlag = false;
+      //RSDataAvailableFlag = false;
       RSSplashPg();
       break;
 
   }
 }
 
-//                                                          _____
-//                                                         / ____|
-//                                                        | (___  
-//                                                         \___ \
-//                                                         ____) |
-//                                                        |_____/ 
+//                                                          _____   __________
+//                                                         / ____|  __________
+//                                                        | (___       |  |
+//                                                         \___ \      |  |
+//                                                         ____) |     |  |
+//                                                        |_____/      |  |
 
 
 void statPg() {                         ///4                   ////////////////////////////////////////////StatPg
-  String title[] = {"Current", "Power", "Energy"};
+  String title[] = {"Current (A)", "Power (W)", "Energy (kWh)"};
   String value = "--";
   char row[20];
 
   if (RSDataAvailableFlag) {
-    RSDataAvailableFlag = false;
+    //RSDataAvailableFlag = false;
     switch (statMode) {
       case 0:     value = current.c_str(); break;
       case 1:     value = power.c_str(); break;
@@ -455,9 +541,9 @@ void statPg() {                         ///4                   /////////////////
   switch (commandCycle) {
     case 0: sprintf(row, "Solar:%s", value);
       lcdUpdate(row, 1, 0); break;
-    case 1: sprintf(row,"MPPT :%s" , value);
-      lcdUpdate(row,2, 0); break;
-    case 2: sprintf(row,"Batt.:%s" , value);
+    case 1: sprintf(row, "MPPT :%s" , value);
+      lcdUpdate(row, 2, 0); break;
+    case 2: sprintf(row, "Batt.:%s" , value);
       lcdUpdate(row, 3, 0); break;
   }
 
@@ -479,7 +565,6 @@ void statPg() {                         ///4                   /////////////////
     case 3:
       statMode++;
       if (statMode == 3)statMode = 0; break;
-
   }
 
 }
@@ -501,9 +586,6 @@ void RSReadPg(String sss, bool btnsOnly) {
 }
 
 
-
-
-
 void RSSplashPg() {
   lcdUpdate("Waiting for the", 0, 1);
   lcdUpdate("device to", 1, 1);
@@ -514,36 +596,83 @@ void RSSplashPg() {
 }
 
 
-//void gyroPg() {
-
-//  char row2[20];
-//  char row3[20];
-//  char row4[20];
-//  sprintf(row2, "ax :  %.3f", fAcc[0]);
-//    sprintf(row3, "ay :  %.3f", fAcc[1]);
-//    sprintf(row4, "az :  %.3f", fAcc[2]);
-//  if (s_cDataUpdate & ACC_UPDATE) {
-//    sprintf(row2, "ax :  %.3f", fAcc[0]);
-//    sprintf(row3, "ay :  %.3f", fAcc[1]);
-//    sprintf(row4, "az :  %.3f", fAcc[2]);
-//    s_cDataUpdate &= ~ACC_UPDATE;
-//  }
-//  
-//  s_cDataUpdate &= ~GYRO_UPDATE;
-//  s_cDataUpdate &= ~ANGLE_UPDATE;
-//  s_cDataUpdate &= ~MAG_UPDATE;
+////////////////////////////////////////////////////////////////////////////////////GGGGGGGGGGGGGGGYYYYYYYYYYYRRRRRRRRROOOOOOOOOOOOOOOOOOO PPPPPPPPGGGGGGGGGGGGGG
+//                                                                ____
+//                                                               / ___|
+//                                                              | |  _
+//                                                              | |_| |
+//                                                               \____|
 //
-//  lcdUpdate("Acceleration", 0, 1);
-//  lcdUpdate(row2, 1, 1);
-//  lcdUpdate(row3, 2, 1);
-//  lcdUpdate(row4, 3, 0);
-//  s_cDataUpdate = 0;
+//                                                                  \\   //
+//                                                                   \\ //
+//                                                                    \v/
+//                                                                    //
 
-//  switch (getBtnStatus()) {
-//    case 2:
-//      mode = 0; break;
-//  }
-//}
+void gyroPg() {
+
+  String title[] = {"Acceleration", "Gyro Data", "Angle", "Compass"};
+  float valueX , valueY, valueZ ;
+  char row[20];
+
+  if (SWSerialAvailableFlag) {
+    SWSerialAvailableFlag = false;
+    switch (gyroMode) {
+      case 0:
+        valueX = fAcc[0];
+        valueY = fAcc[1];
+        valueZ = fAcc[2];
+        break;
+
+      case 1:
+        valueX = fGyro[0];
+        valueY = fGyro[1];
+        valueZ = fGyro[2];
+        break;
+
+      case 2:
+        valueX = fAngle[0];
+        valueY = fAngle[1];
+        valueZ = fAngle[2];
+        break;
+
+      case 3:
+        valueX = fMag[0];
+        valueY = fMag[1];
+        valueZ = fMag[2];
+        break;
+    }
+  }
+  lcdUpdate(title[gyroMode], 0, 1);
+
+  sprintf(row, "X :%.3f", valueX);
+  lcdUpdate(row, 1, 1);
+  sprintf(row, "Y :%.3f" , valueY);
+  lcdUpdate(row, 2, 1);
+  sprintf(row, "Z :%.3f" , valueZ);
+  lcdUpdate(row, 3, 0);
+
+
+  switch (getBtnStatus()) {
+
+    case 1:
+      gyroMode--;
+      if (gyroMode == -1)gyroMode = 3;
+      break;
+
+    case 2:
+      /// todo hold feature
+      break;
+
+    case 200:
+      mode = 5;
+      break;
+
+    case 3:
+      gyroMode++;
+      if (gyroMode == 4)gyroMode = 0; break;
+  }
+
+}
 
 
 
@@ -606,11 +735,11 @@ int getBtnStatus() {
   } else if (!digitalRead(button1)) {
     delay(40);
     while (!digitalRead(button1)) {
-      if(longPress==50)lcd.clear();
-      longPress++;      
+      if (longPress == 50)lcd.clear();
+      longPress++;
       delay(12);
     }
-    if (longPress >50) {
+    if (longPress > 50) {
       return 200;
     } else return 2;
   } else if (!digitalRead(button2)) {
@@ -636,16 +765,16 @@ void RsSend(String ss) {
 
 //                                                                    _____
 //                                                                   / ____|
-//                                                                  | (___  
+//                                                                  | (___
 //                                                                   \___ \
 //                                                                   ____) |
-//                                                                  |_____/ 
+//                                                                  |_____/
 //                                                                    _____
 //                                                                   / ____|
-//                                                                  | (___  
+//                                                                  | (___
 //                                                                   \___ \
 //                                                                   ____) |
-//                                                                  |_____/ 
+//                                                                  |_____/
 
 void serialStuff() {
   int ccc = 0;
@@ -653,15 +782,16 @@ void serialStuff() {
     ccc++;
     char inChar = (char)Serial.read();
     if (inChar == '\n' && receivedString.length() > 1) {
+      RSDataAvailableFlag = true;
       const char* string1 = receivedString.c_str();
       decodeMsg(receivedString);
       if (mode == 485)RSReadPg(receivedString, 0);
-      if (cloudEnabled)client.publish("RSDATA", string1);
+      if (cloudEnabled)client.publish("RSData", string1);
       delay(30);
       receivedString = "";
     } else {
       receivedString += inChar;
-      
+      RSDataAvailableFlag = false;
     }
   }
 }
@@ -674,20 +804,58 @@ void decodeMsg(String msg) {
     // Split the comma-separated values into an array
     String values[16];
     int valueCount = splitString(msg, ',', values);
-    int receivedDeviceID = msg.substring(4, 5).toInt();
-    if (valueCount >= 13 && receivedDeviceID == deviceID) {
-      RSDataAvailableFlag = true;
-      voltage = formatValue(values[2], 0.01, 2) + "V";
-      current = getCurrentDir(values[11].toInt()) + formatValue(values[3], 0.01, 2) + "A";
-      wattHour = formatValue(values[6], 0.00001, 4) + "kWh";
-      soc = calculateSOC(values[5], values[4]) + "%";
-      temp = values[8].substring(1) + "*C"; // Temperature at 8th position
-      power = calculatePwr(voltage, current) + "W"; // Power at 13th position
+    receivedDeviceID = msg.substring(4, 5).toInt();
+    if (valueCount >= 13 && receivedDeviceID == commandCycle + 1) {
+      voltage = formatValue(values[2], 0.01, 2) ;
+      current = getCurrentDir(values[11].toInt()) + formatValue(values[3], 0.01, 2) ;
+      wattHour = formatValue(values[6], 0.00001, 4) ;
+      soc = calculateSOC(values[5], values[4]) ;
+      temp = values[8].substring(1) ; // Temperature at 8th position
+      power = calculatePwr(voltage, current) ; // Power at 13th position
 
+    } else {
+      RSDataAvailableFlag = false;
     }
   }
 }
 
+//String jsonKeys[];//"D1","A1","","","","","","","","","","","","","","","","","","",""
+void jsonStuff() {
+  if (!RSDataAvailableFlag) {
+    voltage = "--" ;
+    current = "--" ;
+    wattHour = "--" ;
+    soc = "--" ;
+    temp = "--" ;
+    power = "--" ;
+  }
+
+  int idKey = commandCycle + 1;
+  jsonDoc["A" + String(idKey)] = current;
+  jsonDoc["V" + String(idKey)] = voltage;
+  jsonDoc["E" + String(idKey)] = wattHour;
+  jsonDoc["P" + String(idKey)] = power;
+  jsonDoc["S" + String(idKey)] = soc;
+  jsonDoc["T" + String(idKey)] = temp;
+
+  if (commandCycle == 2) {
+    jsonDoc["ax"] = String(fAcc[0], 3);
+    jsonDoc["ay"] = String(fAcc[1], 3);
+    jsonDoc["az"] = String(fAcc[2], 3); 
+    jsonDoc["X"] = String(fAngle[0], 3);
+    jsonDoc["Y"] = String(fAngle[1], 3);
+    jsonDoc["Z"] = String(fAngle[2], 3);
+    jsonDoc["mx"] = String(fMag[0], 3);
+    jsonDoc["my"] = String(fMag[1], 3);
+    jsonDoc["mz"] = String(fMag[2], 3);
+    MQTTPub();
+    jsonDoc = DynamicJsonDocument(680);
+    jsonDoc["ID"] = "VLX01";
+  }
+
+
+
+}
 
 int splitString(String input, char separator, String values[]) {
   int valueCount = 0;
@@ -735,24 +903,24 @@ String calculatePwr(String v, String c) {
 void CopeCmdData(unsigned char ucData)
 {
   static unsigned char s_ucData[50], s_ucRxCnt = 0;
-  
+
   s_ucData[s_ucRxCnt++] = ucData;
-  if(s_ucRxCnt<3)return;                    //Less than three data returned
-  if(s_ucRxCnt >= 50) s_ucRxCnt = 0;
-  if(s_ucRxCnt >= 3)
+  if (s_ucRxCnt < 3)return;                 //Less than three data returned
+  if (s_ucRxCnt >= 50) s_ucRxCnt = 0;
+  if (s_ucRxCnt >= 3)
   {
-    if((s_ucData[1] == '\r') && (s_ucData[2] == '\n'))
+    if ((s_ucData[1] == '\r') && (s_ucData[2] == '\n'))
     {
       s_cCmd = s_ucData[0];
-      memset(s_ucData,0,50);
+      memset(s_ucData, 0, 50);
       s_ucRxCnt = 0;
     }
-    else 
+    else
     {
       s_ucData[0] = s_ucData[1];
       s_ucData[1] = s_ucData[2];
       s_ucRxCnt = 2;
-      
+
     }
   }
 }
@@ -760,64 +928,64 @@ void CopeCmdData(unsigned char ucData)
 static void ShowHelp(void)
 {
   Serial.println("WIT_SDK_DEMO");
-//  Serial.print("\r\n************************          HELP           ************************\r\n");
-//  Serial.print("UART SEND:a\\r\\n   Acceleration calibration.\r\n");
-//  Serial.print("UART SEND:m\\r\\n   Magnetic field calibration,After calibration send:   e\\r\\n   to indicate the end\r\n");
-//  Serial.print("UART SEND:U\\r\\n   Bandwidth increase.\r\n");
-//  Serial.print("UART SEND:u\\r\\n   Bandwidth reduction.\r\n");
-//  Serial.print("UART SEND:B\\r\\n   Baud rate increased to 115200.\r\n");
-//  Serial.print("UART SEND:b\\r\\n   Baud rate reduction to 9600.\r\n");
-//  Serial.print("UART SEND:R\\r\\n   The return rate increases to 10Hz.\r\n");
-//  Serial.print("UART SEND:r\\r\\n   The return rate reduction to 1Hz.\r\n");
-//  Serial.print("UART SEND:C\\r\\n   Basic return content: acceleration, angular velocity, angle, magnetic field.\r\n");
-//  Serial.print("UART SEND:c\\r\\n   Return content: acceleration.\r\n");
-//  Serial.print("UART SEND:h\\r\\n   help.\r\n");
-//  Serial.print("******************************************************************************\r\n");
+  //  Serial.print("\r\n************************          HELP           ************************\r\n");
+  //  Serial.print("UART SEND:a\\r\\n   Acceleration calibration.\r\n");
+  //  Serial.print("UART SEND:m\\r\\n   Magnetic field calibration,After calibration send:   e\\r\\n   to indicate the end\r\n");
+  //  Serial.print("UART SEND:U\\r\\n   Bandwidth increase.\r\n");
+  //  Serial.print("UART SEND:u\\r\\n   Bandwidth reduction.\r\n");
+  //  Serial.print("UART SEND:B\\r\\n   Baud rate increased to 115200.\r\n");
+  //  Serial.print("UART SEND:b\\r\\n   Baud rate reduction to 9600.\r\n");
+  //  Serial.print("UART SEND:R\\r\\n   The return rate increases to 10Hz.\r\n");
+  //  Serial.print("UART SEND:r\\r\\n   The return rate reduction to 1Hz.\r\n");
+  //  Serial.print("UART SEND:C\\r\\n   Basic return content: acceleration, angular velocity, angle, magnetic field.\r\n");
+  //  Serial.print("UART SEND:c\\r\\n   Return content: acceleration.\r\n");
+  //  Serial.print("UART SEND:h\\r\\n   help.\r\n");
+  //  Serial.print("******************************************************************************\r\n");
 }
 
 
 
 static void CmdProcess(void)
 {
-  switch(s_cCmd)
+  switch (s_cCmd)
   {
-    case 'a': if(WitStartAccCali() != WIT_HAL_OK) Serial.print("\r\nSet AccCali Error\r\n");
+    case 'a': if (WitStartAccCali() != WIT_HAL_OK) Serial.print("\r\nSet AccCali Error\r\n");
       break;
-    case 'm': if(WitStartMagCali() != WIT_HAL_OK) Serial.print("\r\nSet MagCali Error\r\n");
+    case 'm': if (WitStartMagCali() != WIT_HAL_OK) Serial.print("\r\nSet MagCali Error\r\n");
       break;
-    case 'e': if(WitStopMagCali() != WIT_HAL_OK) Serial.print("\r\nSet MagCali Error\r\n");
+    case 'e': if (WitStopMagCali() != WIT_HAL_OK) Serial.print("\r\nSet MagCali Error\r\n");
       break;
-    case 'u': if(WitSetBandwidth(BANDWIDTH_5HZ) != WIT_HAL_OK) Serial.print("\r\nSet Bandwidth Error\r\n");
+    case 'u': if (WitSetBandwidth(BANDWIDTH_5HZ) != WIT_HAL_OK) Serial.print("\r\nSet Bandwidth Error\r\n");
       break;
-    case 'U': if(WitSetBandwidth(BANDWIDTH_256HZ) != WIT_HAL_OK) Serial.print("\r\nSet Bandwidth Error\r\n");
+    case 'U': if (WitSetBandwidth(BANDWIDTH_256HZ) != WIT_HAL_OK) Serial.print("\r\nSet Bandwidth Error\r\n");
       break;
-    case 'B': if(WitSetUartBaud(WIT_BAUD_115200) != WIT_HAL_OK) Serial.print("\r\nSet Baud Error\r\n");
-              else 
-              {
-                mySerial.begin(c_uiBaud[WIT_BAUD_115200]);
-                Serial.print(" 115200 Baud rate modified successfully\r\n");
-              }
+    case 'B': if (WitSetUartBaud(WIT_BAUD_115200) != WIT_HAL_OK) Serial.print("\r\nSet Baud Error\r\n");
+      else
+      {
+        mySerial.begin(c_uiBaud[WIT_BAUD_115200]);
+        Serial.print(" 115200 Baud rate modified successfully\r\n");
+      }
       break;
-    case 'b': if(WitSetUartBaud(WIT_BAUD_9600) != WIT_HAL_OK) Serial.print("\r\nSet Baud Error\r\n");
-              else 
-              {
-                mySerial.begin(c_uiBaud[WIT_BAUD_9600]); 
-                Serial.print(" 9600 Baud rate modified successfully\r\n");
-              }
+    case 'b': if (WitSetUartBaud(WIT_BAUD_9600) != WIT_HAL_OK) Serial.print("\r\nSet Baud Error\r\n");
+      else
+      {
+        mySerial.begin(c_uiBaud[WIT_BAUD_9600]);
+        Serial.print(" 9600 Baud rate modified successfully\r\n");
+      }
       break;
-    case 'r': if(WitSetOutputRate(RRATE_1HZ) != WIT_HAL_OK)  Serial.print("\r\nSet Baud Error\r\n");
-              else Serial.print("\r\nSet Baud Success\r\n");
+    case 'r': if (WitSetOutputRate(RRATE_1HZ) != WIT_HAL_OK)  Serial.print("\r\nSet Baud Error\r\n");
+      else Serial.print("\r\nSet Baud Success\r\n");
       break;
-    case 'R': if(WitSetOutputRate(RRATE_10HZ) != WIT_HAL_OK) Serial.print("\r\nSet Baud Error\r\n");
-              else Serial.print("\r\nSet Baud Success\r\n");
+    case 'R': if (WitSetOutputRate(RRATE_10HZ) != WIT_HAL_OK) Serial.print("\r\nSet Baud Error\r\n");
+      else Serial.print("\r\nSet Baud Success\r\n");
       break;
-    case 'C': if(WitSetContent(RSW_ACC|RSW_GYRO|RSW_ANGLE|RSW_MAG) != WIT_HAL_OK) Serial.print("\r\nSet RSW Error\r\n");
+    case 'C': if (WitSetContent(RSW_ACC | RSW_GYRO | RSW_ANGLE | RSW_MAG) != WIT_HAL_OK) Serial.print("\r\nSet RSW Error\r\n");
       break;
-    case 'c': if(WitSetContent(RSW_ACC) != WIT_HAL_OK) Serial.print("\r\nSet RSW Error\r\n");
+    case 'c': if (WitSetContent(RSW_ACC) != WIT_HAL_OK) Serial.print("\r\nSet RSW Error\r\n");
       break;
     case 'h': ShowHelp();
       break;
-    default :break;
+    default : break;
   }
   s_cCmd = 0xff;
 }
@@ -842,27 +1010,27 @@ static void Delayms(uint16_t ucMs)
 static void SensorDataUpdata(uint32_t uiReg, uint32_t uiRegNum)
 {
   int i;
-    for(i = 0; i < uiRegNum; i++)
+  for (i = 0; i < uiRegNum; i++)
+  {
+    switch (uiReg)
     {
-        switch(uiReg)
-        {
-            case AZ:
+      case AZ:
         s_cDataUpdate |= ACC_UPDATE;
-            break;
-            case GZ:
+        break;
+      case GZ:
         s_cDataUpdate |= GYRO_UPDATE;
-            break;
-            case HZ:
+        break;
+      case HZ:
         s_cDataUpdate |= MAG_UPDATE;
-            break;
-            case Yaw:
+        break;
+      case Yaw:
         s_cDataUpdate |= ANGLE_UPDATE;
-            break;
-            default:
+        break;
+      default:
         s_cDataUpdate |= READ_UPDATE;
-      break;
-        }
-    uiReg++;
+        break;
     }
+    uiReg++;
+  }
 
 }
