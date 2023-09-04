@@ -16,8 +16,8 @@ LiquidCrystal_I2C lcd(0x27, 16, 4);
 /// Network
 WiFiClient espClient;
 PubSubClient client(espClient);
-const char* ssid = "Starlink";
-const char* password = "155155155";
+const char* ssid = "ETX_DT7";
+const char* password = "ETXP0001";
 const char* mqttBroker = "broker.mqtt-dashboard.com";
 const int mqttPort = 1883;
 const char* mqttTopic0 = "tukLogClient";
@@ -71,7 +71,8 @@ bool SWSerialAvailableFlag = false;
 #define READ_UPDATE   0x80
 static volatile char s_cDataUpdate = 0, s_cCmd = 0xff;
 int i;
-float fAcc[3], fGyro[3], fAngle[3], fMag[3] ;
+float fAcc[3], fGyro[3], fAngle[3];
+int fMag[3] ;
 static void CmdProcess(void);
 static void RS485_IO_Init(void);
 static void AutoScanSensor(void);
@@ -200,7 +201,6 @@ void setup() {
   lcdUpdate("--", 2, 0); ////////////////////////////////////////////////not required
 }
 
-
 //                                                                             _
 //                                                                            | |
 //                                                                            | |
@@ -265,8 +265,6 @@ void loop() {
 //                                                                      | | | |
 //                                                                      | |_| |
 //                                                                      |____/
-
-
 
 void gyroStuff() {
   while (mySerial.available())
@@ -887,7 +885,7 @@ char getCurrentDir(int d) {
 String calculateSOC(String elapsedCapacity, String remainingCapacity) {
   float elapsedAh = elapsedCapacity.toFloat() ;
   float remainingAh = remainingCapacity.toFloat();
-  int socPercentage = int((remainingAh / 120000.0 * 100));
+  int socPercentage = int((remainingAh / 100000.0 * 100));
   return String(socPercentage);
 }
 
