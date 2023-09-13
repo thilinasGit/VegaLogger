@@ -1,5 +1,5 @@
 ///to do memory optimization , refining code
-
+#include <Preferences.h>
 #include <PubSubClient.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
@@ -11,7 +11,7 @@
 
 
 LiquidCrystal_I2C lcd(0x27, 16, 4);
-
+Preferences sharedPreferences;
 
 /// Network
 WiFiClient espClient;
@@ -22,20 +22,21 @@ const char* mqttBroker = "broker.mqtt-dashboard.com";
 const int mqttPort = 1883;
 const char* mqttTopic0 = "tukLogClient";
 bool cloudEnabled = true;
+bool dataSaverEnabled = false;
 const char* ntpServer = "pool.ntp.org";
 unsigned long Epoch_Time;
-int networkTimeout = 0;
+byte networkTimeout = 0;
 
 //HW RX,TX lines common for RS485 communication
-String receivedString = "";// Variable to store the received RS485 data string
+String receivedString;// Variable to store the received RS485 data string
 
 
 ////VA meter stuff
 const String RSCommands[3] = {":R50=1,2,1,\r\n", ":R50=2,2,1,\r\n", ":R50=3,2,1,\r\n"};
 int commandCycle = 0, receivedDeviceID = -1;
-int deviceID = 1, statMode = 0;
+byte deviceID = 1, statMode = 0;
 bool RSDataAvailableFlag = false;
-String voltage, current, power, wattHour, soc, temp;
+String voltage, current, power, wattHour, soc, temp;   //// reserved 20 for each
 
 //UI stuff
 extern String mainMenuItems[];
@@ -47,7 +48,8 @@ int subMenuOrder[] = {2, 0, 1};
 int statMenuOrder[] = {2, 0, 1};
 int gyroMenuOrder[] = {4, 0, 1, 2, 3};
 int mode = 0, gyroMode = 0;
-
+String r0 , r1 , r2 , r3 ;     /// reserved 20 for each
+ 
 extern byte icon[] ;
 
 //// IO
@@ -56,10 +58,6 @@ extern byte icon[] ;
 #define button0 26
 #define button1 27
 #define button2 14
-
-/// time tracking variables
-unsigned long lastProcessTime = 0;
-const unsigned long processInterval = 20;  // tracking time
 
 /////////  gyro stuff
 SoftwareSerial mySerial(13, 12); // RX, TX
@@ -73,13 +71,6 @@ static volatile char s_cDataUpdate = 0, s_cCmd = 0xff;
 int i;
 float fAcc[3], fGyro[3], fAngle[3];
 int fMag[3] ;
-static void CmdProcess(void);
-static void RS485_IO_Init(void);
-static void AutoScanSensor(void);
-static void SensorUartSend(uint8_t *p_data, uint32_t uiSize);
-static void CopeSensorData(uint32_t uiReg, uint32_t uiRegNum);
-static void Delayms(uint16_t ucMs);
-const uint32_t c_uiBaud[8] = { 0, 4800, 9600, 19200, 38400, 57600, 115200, 230400};
 
 ///// Jason obj for mqtt
 DynamicJsonDocument jsonDoc(350); // Adjust the capacity as needed
@@ -87,10 +78,23 @@ DynamicJsonDocument jsonDoc(350); // Adjust the capacity as needed
 
 
 
+
 void callback(char* topic, byte* payload, unsigned int length) {
-  ////to do
+  char payloadStr[length + 1];
+  memcpy(payloadStr, payload, length);
+  payloadStr[length] = '\0';
 
-
+  if (strcmp(topic, "setFlags") == 0) {
+    if (strcmp(payloadStr, "fastMode=1") == 0) {
+      dataSaverEnabled = false; // Set dataSaverFlag to false
+    }
+    else if (strcmp(payloadStr, "fastMode=0") == 0) {
+      dataSaverEnabled = true; // Set dataSaverFlag to true
+    }
+  }
+  else {
+    // No other topics here
+  }
 }
 
 
@@ -142,7 +146,7 @@ void MQTTPub() {
 }
 
 void reconnect() {
-  while (!client.connected()) {
+  if (!client.connected()) {
     networkTimeout++;
     if (networkTimeout > 2) {
       lcdUpdate("Connection Lost", 1, 1);
@@ -158,8 +162,8 @@ void reconnect() {
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
-      Serial.println(" retrying in 5 seconds");
-      delay(5000);
+      //Serial.println(" retrying in 5 seconds");
+      delay(50);
     }
   }
 }
@@ -177,6 +181,10 @@ void setup() {
   lcd.backlight();
   lcd.createChar(1, icon); // battery icon
   Serial.begin(115200);       /////// default baud for energy meter is 115200
+  Serial.setRxBufferSize(256);
+  
+  stringStuff();
+  
   Serial.print("Connecting to ");
   Serial.println(ssid);
   pinMode(RS485_DE , OUTPUT);
@@ -192,6 +200,11 @@ void setup() {
     delay(2500);
   }
 
+  sharedPreferences.begin("settings", false);                      /// retrieve settings
+  dataSaverEnabled = sharedPreferences.getBool("dataSaverFlag", true);
+  dataSaverEnabled = sharedPreferences.getBool("clientEnabledFlag", true);
+  sharedPreferences.end();
+  
   mySerial.begin(9600);
   WitInit(WIT_PROTOCOL_NORMAL, 0x50);
   WitSerialWriteRegister(SensorUartSend);
@@ -199,6 +212,8 @@ void setup() {
   WitDelayMsRegister(Delayms); WitSetUartBaud(WIT_BAUD_115200);
   lcdUpdate("RS485 down", 1, 1); ////////////////////////////////////////////////not required
   lcdUpdate("--", 2, 0); ////////////////////////////////////////////////not required
+
+  
 }
 
 //                                                                             _
@@ -219,7 +234,6 @@ void loop() {
 
     }
 
-
   if (commandCycle > 2)commandCycle = 0;
 
   RsSend(RSCommands[commandCycle]);
@@ -228,7 +242,7 @@ void loop() {
   RSDataAvailableFlag = false;
   serialStuff();
 
-  jsonStuff();
+  if(cloudEnabled)jsonStuff();
 
 
   //// UI Render
@@ -240,19 +254,11 @@ void loop() {
     case 4: statPg();   break;
     case 5: gyroMenuPg(); break;
     case 6: gyroPg(); break;
+    case 7: mqttSettingsPg(); break;
     case 485: RSReadPg("", 1);
   }
 
-
-
-  // unsigned long currentMillis = millis();
-  //
-  //  if (currentMillis - lastProcessTime >= processInterval) {// Pseudo thread every xx millis
-  //    lastProcessTime = currentMillis;
-  //}
-
   commandCycle++;
-  //delay(100);
 }
 
 //                                                                ____
@@ -341,6 +347,7 @@ void mainMenuPg() {                         ///0                  //////////////
       if (mainMenuOrder[1] == 0)mode = 3;
       else if (mainMenuOrder[1] == 1)mode = 1;
       else if (mainMenuOrder[1] == 2)mode = 5;
+      else if (mainMenuOrder[1] == 3)mode = 7;
       else if (mainMenuOrder[1] == 4) {
         mode = 485;
         //RSDataAvailableFlag = false;
@@ -545,6 +552,7 @@ void statPg() {                         ///4                   /////////////////
       lcdUpdate(row, 3, 0); break;
   }
 
+
   switch (getBtnStatus()) {
 
     case 1:
@@ -674,7 +682,63 @@ void gyroPg() {
 
 
 
-String r0 = "                ", r1 = "                ", r2 = "                ", r3 = "                ";
+bool curPos = false;
+void mqttSettingsPg() {                               /////////////////////////////////////////////  MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMSSSSSSSSSSSSSSSSSSSS
+  char row1[20];
+  char row2[20];
+
+  char cursorPlaceHolder[2] = {'>', ' '};
+  if (curPos) {
+    cursorPlaceHolder[0] = ' ';
+    cursorPlaceHolder[1] = '>';
+  }
+
+  if (cloudEnabled)
+    sprintf(row1, "%c%s" , cursorPlaceHolder[0], "Disable client");
+  else sprintf(row1, "%c%s" , cursorPlaceHolder[0], "Enable client");
+
+if(cloudEnabled){
+  if (dataSaverEnabled)
+    sprintf(row2, "%c%s" , cursorPlaceHolder[1], "Enable fastmode");
+  else sprintf(row2, "%c%s" , cursorPlaceHolder[1], "Disable fastmode");
+} else sprintf(row2, "--" );
+
+  lcdUpdate(" MQTT Settings", 0, 1);
+  lcdUpdate(row1, 1, 1);
+  lcdUpdate(row2, 2, 1);
+  lcdUpdate("Resets on boot!", 3, 0);
+
+  switch (getBtnStatus()) {
+
+    case 1:
+      curPos = !curPos;
+      break;
+
+    case 2:
+      if (!curPos){
+        cloudEnabled = !cloudEnabled;
+        writeBoolToNVS(0,cloudEnabled);
+      }
+      else {
+        dataSaverEnabled = !dataSaverEnabled;
+        writeBoolToNVS(1,dataSaverEnabled);
+      }    
+      
+      break;
+
+    case 200:
+      mode = 0;
+      break;
+
+    case 3:
+      curPos = !curPos;
+      break;
+
+  }
+}
+
+
+
 void lcdUpdate(String ss, int row , bool postUpdate) {
 
   if (ss.length() > 16) {
@@ -756,6 +820,7 @@ int getBtnStatus() {
 
 void RsSend(String ss) {
   digitalWrite(RS485_DE, HIGH);
+  delayMicroseconds(10);
   Serial.print(ss);
   delayMicroseconds(1150);
   digitalWrite(RS485_DE, LOW);
@@ -776,17 +841,17 @@ void RsSend(String ss) {
 
 void serialStuff() {
   int ccc = 0;
-  while (Serial.available() && ccc < 100) {
+  while (Serial.available() && ccc < 255) {
     ccc++;
     char inChar = (char)Serial.read();
-    if (inChar == '\n' && receivedString.length() > 1) {
+    if (receivedString.length()>250|inChar == '\n' && receivedString.length() > 1) {
       RSDataAvailableFlag = true;
       const char* string1 = receivedString.c_str();
-      decodeMsg(receivedString);
+      decodeMsg();
       if (mode == 485)RSReadPg(receivedString, 0);
-      if (cloudEnabled)client.publish("RSData", string1);
+      if (cloudEnabled)client.publish("RSData", string1);     
+      receivedString = ""; 
       delay(30);
-      receivedString = "";
     } else {
       receivedString += inChar;
       RSDataAvailableFlag = false;
@@ -795,22 +860,21 @@ void serialStuff() {
 }
 
 
-void decodeMsg(String msg) {
-  int indexToExtract = msg.indexOf("r50=");
+void decodeMsg() {
+  int indexToExtract = receivedString.indexOf("r50=");
   if (indexToExtract > 0) {
-    msg = msg.substring(indexToExtract);
+    receivedString = receivedString.substring(indexToExtract);
     // Split the comma-separated values into an array
-    String values[16];
-    int valueCount = splitString(msg, ',', values);
-    receivedDeviceID = msg.substring(4, 5).toInt();
-    if (valueCount >= 13 && receivedDeviceID == commandCycle + 1) {
+    String values[18];
+    int valueCount = splitString(receivedString, ',', values,18);
+    receivedDeviceID = receivedString.substring(4, 5).toInt();
+    if (valueCount >= 12 && receivedDeviceID == commandCycle + 1) {
       voltage = formatValue(values[2], 0.01, 2) ;
       current = getCurrentDir(values[11].toInt()) + formatValue(values[3], 0.01, 2) ;
       wattHour = formatValue(values[6], 0.00001, 4) ;
       soc = calculateSOC(values[5], values[4]) ;
       temp = values[8].substring(1) ; // Temperature at 8th position
       power = calculatePwr(voltage, current) ; // Power at 13th position
-
     } else {
       RSDataAvailableFlag = false;
     }
@@ -818,6 +882,7 @@ void decodeMsg(String msg) {
 }
 
 //String jsonKeys[];//"D1","A1","","","","","","","","","","","","","","","","","","",""
+bool mqttSentFlag;   ///////////////////// data saver mode requiment
 void jsonStuff() {
   if (!RSDataAvailableFlag) {
     voltage = "--" ;
@@ -839,26 +904,29 @@ void jsonStuff() {
   if (commandCycle == 2) {
     jsonDoc["ax"] = String(fAcc[0], 3);
     jsonDoc["ay"] = String(fAcc[1], 3);
-    jsonDoc["az"] = String(fAcc[2], 3); 
+    jsonDoc["az"] = String(fAcc[2], 3);
     jsonDoc["X"] = String(fAngle[0], 3);
     jsonDoc["Y"] = String(fAngle[1], 3);
     jsonDoc["Z"] = String(fAngle[2], 3);
-    jsonDoc["mx"] = String(fMag[0], 3);
-    jsonDoc["my"] = String(fMag[1], 3);
-    jsonDoc["mz"] = String(fMag[2], 3);
-    MQTTPub();
+    jsonDoc["mx"] = String(fMag[0]);
+    jsonDoc["my"] = String(fMag[1]);
+    jsonDoc["mz"] = String(fMag[2]);
+    if (dataSaverEnabled) {      
+      if (getEpochTime() % 2 == 0){
+        if(!mqttSentFlag)MQTTPub();
+        mqttSentFlag=true;} 
+        else mqttSentFlag=false;
+      } else MQTTPub();
     jsonDoc = DynamicJsonDocument(680);
     jsonDoc["ID"] = "VLX01";
   }
-
-
-
 }
 
-int splitString(String input, char separator, String values[]) {
+
+int splitString(String input, char separator, String values[], int arraySize) {
   int valueCount = 0;
   int startIndex = 0;
-  while (startIndex >= 0) {
+  while (startIndex >= 0 && valueCount < arraySize) {
     int endIndex = input.indexOf(separator, startIndex);
     if (endIndex == -1) {
       values[valueCount++] = input.substring(startIndex);
@@ -898,6 +966,7 @@ String calculatePwr(String v, String c) {
   return String(watts);
 }
 
+
 void CopeCmdData(unsigned char ucData)
 {
   static unsigned char s_ucData[50], s_ucRxCnt = 0;
@@ -922,73 +991,6 @@ void CopeCmdData(unsigned char ucData)
     }
   }
 }
-
-static void ShowHelp(void)
-{
-  Serial.println("WIT_SDK_DEMO");
-  //  Serial.print("\r\n************************          HELP           ************************\r\n");
-  //  Serial.print("UART SEND:a\\r\\n   Acceleration calibration.\r\n");
-  //  Serial.print("UART SEND:m\\r\\n   Magnetic field calibration,After calibration send:   e\\r\\n   to indicate the end\r\n");
-  //  Serial.print("UART SEND:U\\r\\n   Bandwidth increase.\r\n");
-  //  Serial.print("UART SEND:u\\r\\n   Bandwidth reduction.\r\n");
-  //  Serial.print("UART SEND:B\\r\\n   Baud rate increased to 115200.\r\n");
-  //  Serial.print("UART SEND:b\\r\\n   Baud rate reduction to 9600.\r\n");
-  //  Serial.print("UART SEND:R\\r\\n   The return rate increases to 10Hz.\r\n");
-  //  Serial.print("UART SEND:r\\r\\n   The return rate reduction to 1Hz.\r\n");
-  //  Serial.print("UART SEND:C\\r\\n   Basic return content: acceleration, angular velocity, angle, magnetic field.\r\n");
-  //  Serial.print("UART SEND:c\\r\\n   Return content: acceleration.\r\n");
-  //  Serial.print("UART SEND:h\\r\\n   help.\r\n");
-  //  Serial.print("******************************************************************************\r\n");
-}
-
-
-
-static void CmdProcess(void)
-{
-  switch (s_cCmd)
-  {
-    case 'a': if (WitStartAccCali() != WIT_HAL_OK) Serial.print("\r\nSet AccCali Error\r\n");
-      break;
-    case 'm': if (WitStartMagCali() != WIT_HAL_OK) Serial.print("\r\nSet MagCali Error\r\n");
-      break;
-    case 'e': if (WitStopMagCali() != WIT_HAL_OK) Serial.print("\r\nSet MagCali Error\r\n");
-      break;
-    case 'u': if (WitSetBandwidth(BANDWIDTH_5HZ) != WIT_HAL_OK) Serial.print("\r\nSet Bandwidth Error\r\n");
-      break;
-    case 'U': if (WitSetBandwidth(BANDWIDTH_256HZ) != WIT_HAL_OK) Serial.print("\r\nSet Bandwidth Error\r\n");
-      break;
-    case 'B': if (WitSetUartBaud(WIT_BAUD_115200) != WIT_HAL_OK) Serial.print("\r\nSet Baud Error\r\n");
-      else
-      {
-        mySerial.begin(c_uiBaud[WIT_BAUD_115200]);
-        Serial.print(" 115200 Baud rate modified successfully\r\n");
-      }
-      break;
-    case 'b': if (WitSetUartBaud(WIT_BAUD_9600) != WIT_HAL_OK) Serial.print("\r\nSet Baud Error\r\n");
-      else
-      {
-        mySerial.begin(c_uiBaud[WIT_BAUD_9600]);
-        Serial.print(" 9600 Baud rate modified successfully\r\n");
-      }
-      break;
-    case 'r': if (WitSetOutputRate(RRATE_1HZ) != WIT_HAL_OK)  Serial.print("\r\nSet Baud Error\r\n");
-      else Serial.print("\r\nSet Baud Success\r\n");
-      break;
-    case 'R': if (WitSetOutputRate(RRATE_10HZ) != WIT_HAL_OK) Serial.print("\r\nSet Baud Error\r\n");
-      else Serial.print("\r\nSet Baud Success\r\n");
-      break;
-    case 'C': if (WitSetContent(RSW_ACC | RSW_GYRO | RSW_ANGLE | RSW_MAG) != WIT_HAL_OK) Serial.print("\r\nSet RSW Error\r\n");
-      break;
-    case 'c': if (WitSetContent(RSW_ACC) != WIT_HAL_OK) Serial.print("\r\nSet RSW Error\r\n");
-      break;
-    case 'h': ShowHelp();
-      break;
-    default : break;
-  }
-  s_cCmd = 0xff;
-}
-
-
 
 
 static void SensorUartSend(uint8_t *p_data, uint32_t uiSize)
@@ -1030,5 +1032,32 @@ static void SensorDataUpdata(uint32_t uiReg, uint32_t uiRegNum)
     }
     uiReg++;
   }
+}
 
+void stringStuff(){
+  receivedString.reserve(250);
+  r0.reserve(20);
+  r1.reserve(20);
+  r2.reserve(20);
+  r3.reserve(20);
+  r0= "                ";
+  r1= "                ";
+  r2= "                ";
+  r3= "                ";
+  voltage.reserve(20);
+  current.reserve(20);
+  power.reserve(20);
+  wattHour.reserve(20);
+  soc.reserve(20);
+  temp.reserve(20);
+}
+
+
+void writeBoolToNVS(int c,bool torf) {    //// write sharedPreferences  
+  sharedPreferences.begin("settings", false);
+  switch(c){
+    case 0:sharedPreferences.putBool("clientEnabledFlag", torf); break;
+    case 1:sharedPreferences.putBool("dataSaverFlag", torf); break;
+  }  
+  sharedPreferences.end();
 }
