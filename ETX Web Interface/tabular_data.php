@@ -1,4 +1,5 @@
 <?php
+    session_start();
     include('config.php');
     $connection = new mysqli($host, $user, $password, $database);
     // Check connection
@@ -14,8 +15,18 @@
     $currentPage = 1;
     }
 
+    $id='';
+    if(isset($_GET['etx_id'])){
+        $_SESSION['id']=$_GET['etx_id'];
+
+    }
+
+    if (isset($_SESSION['id'])) {
+        $id = $_SESSION['id'];
+    }
+
     // Step 3: Fetch data from the "log" table with pagination
-    $sql_count = "SELECT COUNT(*) as totalRecords FROM log"; // Count total records
+    $sql_count = "SELECT COUNT(*) as totalRecords FROM log WHERE ID ='$id'"; // Count total records
     $result = $connection->query($sql_count);
     if(!$result){
         die('Error: '.$conn->error);
@@ -32,10 +43,7 @@
 
     // Calculate the starting record for the current page
     $startRecord = ($currentPage - 1) * $recordsPerPage;
-    $id='';
-    if(isset($_GET['etx_id'])){
-        $id=$_GET['etx_id'];        
-    }
+ 
     //write query for all data
     $sql="SELECT * FROM log WHERE ID ='$id' ORDER BY timestamp DESC LIMIT $startRecord,$recordsPerPage";
     //make query &get result
@@ -44,13 +52,15 @@
     //fetch the resulting rows as an array
     $data=mysqli_fetch_all($result,MYSQLI_ASSOC);
 
-    if (isset($_GET['start_date']) && isset($_GET['end_date'])) {
+
+    if (isset($_GET['start_date']) && isset($_GET['end_date']) ) {
 
         $start_timestamp = $_GET['start_date'];
         $end_timestamp = $_GET['end_date'];
+        // $id=$_GET['etx_id'];
 
-        
-        $all_data="SELECT * FROM log WHERE timestamp >= '$start_timestamp 00:00:00' AND timestamp <= '$end_timestamp 23:59:59' ORDER BY timestamp DESC";
+    
+        $all_data="SELECT * FROM log WHERE ID ='$id' AND timestamp >= '$start_timestamp 00:00:00' AND timestamp <= '$end_timestamp 23:59:59' ORDER BY timestamp DESC";
 
         $all_data_result=mysqli_query($connection,$all_data) or die("Selection Error " . mysqli_error($connection));
 
@@ -73,8 +83,9 @@
 
         fclose($fp);
         exit();
-
+    
     }
+    
 ?>
 
 <!DOCTYPE html>

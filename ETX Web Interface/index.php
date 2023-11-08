@@ -1,4 +1,5 @@
 <?php
+    session_start();
     include('config.php');
 
     $connection = new mysqli($host, $user, $password, $database);
@@ -122,8 +123,7 @@
         <h2>ETX Telemetry Data</h2>
         <form id="myform"  method="get">
             <label for="etx_id">Choose ETX Id: </label>
-            <!-- <select name="etx_id" id="etx_id" onchange="myform.submit();"> -->
-            <select name="etx_id" id="etx_id" onchange="selectIDChanged()">
+            <select name="etx_id" id="etx_id" onchange="onSelectedID();">
                 <option>Select</option>
                 <option value="VLX01">P08</option>
                 <option value="VLX02">P07</option>
@@ -172,14 +172,11 @@
             xhttp.open("GET", sourceUrl, true);
             xhttp.send();
             }
-            setInterval(function selectIDChanged() {
+            setInterval(function onSelectedID() {
                 var selectedID=document.getElementById("etx_id").value;
                 loadXMLDoc("link1","column_cards.php?etx_id="+selectedID);
                 loadXMLDoc("link2","angle_cards.php?etx_id="+selectedID);
             },1000)
-
-        
-
             window.onload=loadXMLDoc;
             window.onload=display_ct;
         </script>
