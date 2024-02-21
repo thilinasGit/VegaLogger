@@ -41,7 +41,7 @@ client = paho.Client(clean_session=True)
 client.on_subscribe = on_subscribe
 client.on_message = on_message
 client.connect('broker.mqtt-dashboard.com', 1883)
-client.subscribe('tukLogClient',qos=0)
+client.subscribe('TopicHidden',qos=0)
 client.loop_forever()
 
 
