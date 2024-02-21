@@ -33,7 +33,7 @@ try {
     
 
     // Subscribe to the topic 'foo/bar/baz' using QoS 0.
-    $client->subscribe('tukLogClient', function (string $topic, string $message, bool $retained) use ($connection,$client) {
+    $client->subscribe('TopicHidden', function (string $topic, string $message, bool $retained) use ($connection,$client) {
         // Assuming the MQTT message contains JSON data
         $query="INSERT INTO log (ID,A1,V1,E1,P1,S1,T1,A2,V2,E2,P2,S2,T2,A3,V3,E3,P3,S3,T3,ax,ay,az,X,Y,Z,mx,my,mz,timestamp) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
         $stmt=$connection->prepare($query);
